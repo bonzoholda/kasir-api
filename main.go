@@ -9,6 +9,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time" // Needed for retry sleep
 
 	_ "github.com/lib/pq" // PostgreSQL Driver
 	"github.com/spf13/viper"
@@ -39,7 +40,6 @@ func main() {
 		_ = viper.ReadInConfig()
 	}
 
-	// Priority: OS Environment Variable > Viper Config > Default
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = viper.GetString("PORT")
@@ -58,43 +58,54 @@ func main() {
 		DBConn: dbConn,
 	}
 
-	// 2. CONNECT TO DATABASE
+	// 2. CONNECT TO DATABASE (With Retry Logic)
 	if config.DBConn == "" {
-		log.Fatal("CRITICAL: DB_CONN environment variable is empty. Check Railway settings.")
+		log.Fatal("CRITICAL: DB_CONN is empty. Check Railway settings.")
 	}
-
-	// Logging the length helps debug without leaking your password in logs
-	fmt.Printf("Attempting to connect to DB (String Length: %d)\n", len(config.DBConn))
 
 	var err error
 	db, err = sql.Open("postgres", config.DBConn)
 	if err != nil {
-		log.Fatal("Error opening database:", err)
+		log.Fatal("Error opening database driver:", err)
+	}
+
+	// PROVEN SETTINGS FOR SUPABASE POOLER:
+	// Limits help prevent the "EOF" error by not overwhelming the pooler
+	db.SetMaxOpenConns(5)
+	db.SetMaxIdleConns(2)
+	db.SetConnMaxLifetime(time.Minute * 5)
+
+	// Retry Ping logic: Gives Railway network time to stabilize
+	fmt.Printf("Starting DB connection attempts (String Length: %d)\n", len(config.DBConn))
+	for i := 1; i <= 5; i++ {
+		err = db.Ping()
+		if err == nil {
+			fmt.Println("✅ Successfully connected to Database!")
+			break
+		}
+		fmt.Printf("⚠️ Attempt %d/5: Database unreachable, retrying in 2s... (%v)\n", i, err)
+		time.Sleep(2 * time.Second)
+	}
+
+	if err != nil {
+		log.Fatal("❌ Failed to connect to database after 5 attempts. Check your DB_CONN string.")
 	}
 	defer db.Close()
-
-	// Check connection
-	err = db.Ping()
-	if err != nil {
-		log.Fatal("Database unreachable:", err)
-	}
 
 	// 3. ROUTES
 	http.HandleFunc("/api/produk", handleProductCollection)
 	http.HandleFunc("/api/produk/", handleProductByID)
-
-	// Health check for Railway
 	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("OK"))
 	})
 
 	addr := ":" + config.Port
-	fmt.Println("Server running on", addr)
+	fmt.Println("🚀 Server running on", addr)
 	log.Fatal(http.ListenAndServe(addr, nil))
 }
 
-// --- Handlers remain unchanged to keep your logic intact ---
+// --- Handlers ---
 
 func handleProductCollection(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
@@ -107,7 +118,7 @@ func handleProductCollection(w http.ResponseWriter, r *http.Request) {
 		}
 		defer rows.Close()
 
-		var products []Product = []Product{} // Initialize empty to avoid null in JSON
+		products := []Product{}
 		for rows.Next() {
 			var p Product
 			rows.Scan(&p.ID, &p.CreatedAt, &p.Name, &p.Price, &p.Stock)
