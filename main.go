@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -9,107 +10,117 @@ import (
 	"strconv"
 	"strings"
 
+	_ "github.com/lib/pq" // PostgreSQL Driver
 	"github.com/spf13/viper"
 )
 
-// Config struct for Viper
+// Config struct
 type Config struct {
 	Port   string `mapstructure:"PORT"`
 	DBConn string `mapstructure:"DB_CONN"`
 }
 
-// Produk struct
-type Produk struct {
-	ID        int64  `json:"id"`         // bigint maps to int64
-	CreatedAt string `json:"created_at"` // matches timestamp
-	Name      string `json:"name"`       // matches name
-	Price     int    `json:"price"`      // matches price
-	Stock     int    `json:"stock"`      // matches stock
+// Product matches your database schema exactly
+type Product struct {
+	ID        int64  `json:"id"`
+	CreatedAt string `json:"created_at"`
+	Name      string `json:"name"`
+	Price     int    `json:"price"`
+	Stock     int    `json:"stock"`
 }
 
-// Keeping the in-memory storage for now so the code runs
-var produk = []Produk{
-	{ID: 1, Nama: "Indomie Godog", Harga: 3500, Stok: 10},
-	{ID: 2, Nama: "Vit 1000ml", Harga: 3000, Stok: 40},
-}
+var db *sql.DB // Global database connection
 
 func main() {
 	// 1. SETUP VIPER
 	viper.AutomaticEnv()
-	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
-
 	if _, err := os.Stat(".env"); err == nil {
 		viper.SetConfigFile(".env")
 		_ = viper.ReadInConfig()
 	}
-
-	// Default values if .env is missing
 	viper.SetDefault("PORT", "8080")
 
 	config := Config{
 		Port:   viper.GetString("PORT"),
-		DBConn: viper.GetString("DB_CONN"),
+		DBConn: viper.GetString("DB_CONN"), // Should be DATABASE_URL on Railway
 	}
 
-	// 2. DATABASE (Note: This requires your 'database' package to exist)
-	/* db, err := database.InitDB(config.DBConn)
+	// 2. CONNECT TO DATABASE
+	var err error
+	db, err = sql.Open("postgres", config.DBConn)
 	if err != nil {
-		log.Fatal("Failed to initialize database:", err)
+		log.Fatal(err)
 	}
 	defer db.Close()
-	*/
+
+	// Check connection
+	err = db.Ping()
+	if err != nil {
+		log.Fatal("Database unreachable:", err)
+	}
 
 	// 3. ROUTES
-	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]string{"status": "OK"})
-	})
+	http.HandleFunc("/api/produk", handleProductCollection)
+	http.HandleFunc("/api/produk/", handleProductByID)
 
-	// Collection Route
-	http.HandleFunc("/api/produk", handleProdukCollection)
-
-	// Item Route
-	http.HandleFunc("/api/produk/", handleProdukWithID)
-
-	// 4. START SERVER
-	addr := ":" + config.Port // Railway needs the colon format
-	fmt.Println("Server running di port", addr)
-
-	if err := http.ListenAndServe(addr, nil); err != nil {
-		log.Fatalf("gagal running server: %v", err)
-	}
+	addr := ":" + config.Port
+	fmt.Println("Server running on", addr)
+	log.Fatal(http.ListenAndServe(addr, nil))
 }
 
-// --- Handlers ---
+// --- Handlers using SQL ---
 
-func handleProdukCollection(w http.ResponseWriter, r *http.Request) {
+func handleProductCollection(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
 	if r.Method == "GET" {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(produk)
+		rows, err := db.Query("SELECT id, created_at, name, price, stock FROM product")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		defer rows.Close()
+
+		var products []Product
+		for rows.Next() {
+			var p Product
+			rows.Scan(&p.ID, &p.CreatedAt, &p.Name, &p.Price, &p.Stock)
+			products = append(products, p)
+		}
+		json.NewEncoder(w).Encode(products)
+
 	} else if r.Method == "POST" {
-		var p Produk
-		json.NewDecoder(r.Body).Decode(&p)
-		p.ID = len(produk) + 1
-		produk = append(produk, p)
+		var p Product
+		if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+			http.Error(w, "Invalid JSON", http.StatusBadRequest)
+			return
+		}
+
+		// Insert into "product" table
+		query := `INSERT INTO product (name, price, stock) VALUES ($1, $2, $3) RETURNING id, created_at`
+		err := db.QueryRow(query, p.Name, p.Price, p.Stock).Scan(&p.ID, &p.CreatedAt)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(p)
 	}
 }
 
-func handleProdukWithID(w http.ResponseWriter, r *http.Request) {
+func handleProductByID(w http.ResponseWriter, r *http.Request) {
 	idStr := strings.TrimPrefix(r.URL.Path, "/api/produk/")
 	id, _ := strconv.Atoi(idStr)
 
-	switch r.Method {
-	case "GET":
-		for _, p := range produk {
-			if p.ID == id {
-				json.NewEncoder(w).Encode(p)
-				return
-			}
+	if r.Method == "GET" {
+		var p Product
+		query := `SELECT id, created_at, name, price, stock FROM product WHERE id = $1`
+		err := db.QueryRow(query, id).Scan(&p.ID, &p.CreatedAt, &p.Name, &p.Price, &p.Stock)
+		if err == sql.ErrNoRows {
+			http.NotFound(w, r)
+			return
 		}
-		http.NotFound(w, r)
-	case "DELETE":
-		// ... delete logic ...
-		w.Write([]byte("Deleted"))
+		json.NewEncoder(w).Encode(p)
 	}
 }
