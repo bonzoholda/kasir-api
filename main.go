@@ -11,14 +11,9 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/lib/pq" // PostgreSQL Driver
+	_ "github.com/jackc/pgx/v5/stdlib" // ✅ pgx stdlib driver
 	"github.com/spf13/viper"
 )
-
-type Config struct {
-	Port   string
-	DBConn string
-}
 
 type Product struct {
 	ID        int64  `json:"id"`
@@ -31,7 +26,7 @@ type Product struct {
 var db *sql.DB
 
 func main() {
-	// 1. SETUP
+	// --- ENV SETUP ---
 	viper.AutomaticEnv()
 	if _, err := os.Stat(".env"); err == nil {
 		viper.SetConfigFile(".env")
@@ -50,9 +45,11 @@ func main() {
 	if dbConn == "" {
 		dbConn = viper.GetString("DB_CONN")
 	}
+	if dbConn == "" {
+		log.Fatal("❌ DB_CONN is not set")
+	}
 
-	// 2. STABILIZE CONNECTION STRING
-	// We force a timeout so the app doesn't hang forever on EOF
+	// Ensure connect_timeout exists
 	if !strings.Contains(dbConn, "connect_timeout") {
 		if strings.Contains(dbConn, "?") {
 			dbConn += "&connect_timeout=15"
@@ -61,22 +58,20 @@ func main() {
 		}
 	}
 
-	// 3. CONNECT WITH POOLER LIMITS
+	// --- DB CONNECT ---
 	var err error
-	db, err = sql.Open("postgres", dbConn)
+	db, err = sql.Open("pgx", dbConn) // ✅ pgx driver
 	if err != nil {
 		log.Fatal("Driver error:", err)
 	}
 
-	// PROVEN FIX: The pooler hates multiple idle connections from a fresh boot.
-	// We set these strictly to allow the handshake to finish.
+	// Supabase PgBouncer-safe limits
 	db.SetMaxOpenConns(2)
 	db.SetMaxIdleConns(1)
 	db.SetConnMaxLifetime(time.Hour)
 
 	fmt.Printf("Starting connection attempts (Len: %d)...\n", len(dbConn))
 
-	// Robust Retry Logic
 	for i := 1; i <= 5; i++ {
 		err = db.Ping()
 		if err == nil {
@@ -92,10 +87,10 @@ func main() {
 	}
 	defer db.Close()
 
-	// 4. ROUTES
+	// --- ROUTES ---
 	http.HandleFunc("/api/produk", handleProductCollection)
 	http.HandleFunc("/api/produk/", handleProductByID)
-	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+	http.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("OK"))
 	})
@@ -105,51 +100,92 @@ func main() {
 	log.Fatal(http.ListenAndServe(addr, nil))
 }
 
-// --- Handlers (Standard Logic) ---
+// --- HANDLERS ---
 
 func handleProductCollection(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	if r.Method == "GET" {
-		rows, err := db.Query("SELECT id, created_at, name, price, stock FROM product")
+
+	switch r.Method {
+	case "GET":
+		rows, err := db.Query(`
+			SELECT id, created_at, name, price, stock
+			FROM product
+			ORDER BY id DESC
+		`)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		defer rows.Close()
-		products := []Product{}
+
+		var products []Product
 		for rows.Next() {
 			var p Product
-			rows.Scan(&p.ID, &p.CreatedAt, &p.Name, &p.Price, &p.Stock)
+			if err := rows.Scan(&p.ID, &p.CreatedAt, &p.Name, &p.Price, &p.Stock); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
 			products = append(products, p)
 		}
+
 		json.NewEncoder(w).Encode(products)
-	} else if r.Method == "POST" {
+
+	case "POST":
 		var p Product
 		if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
 			http.Error(w, "Invalid JSON", http.StatusBadRequest)
 			return
 		}
-		query := `INSERT INTO product (name, price, stock) VALUES ($1, $2, $3) RETURNING id, created_at`
-		err := db.QueryRow(query, p.Name, p.Price, p.Stock).Scan(&p.ID, &p.CreatedAt)
+
+		err := db.QueryRow(
+			`INSERT INTO product (name, price, stock)
+			 VALUES ($1, $2, $3)
+			 RETURNING id, created_at`,
+			p.Name, p.Price, p.Stock,
+		).Scan(&p.ID, &p.CreatedAt)
+
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(p)
+
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
 	}
 }
 
 func handleProductByID(w http.ResponseWriter, r *http.Request) {
 	idStr := strings.TrimPrefix(r.URL.Path, "/api/produk/")
-	id, _ := strconv.Atoi(idStr)
-	if r.Method == "GET" {
-		var p Product
-		err := db.QueryRow("SELECT id, created_at, name, price, stock FROM product WHERE id = $1", id).Scan(&p.ID, &p.CreatedAt, &p.Name, &p.Price, &p.Stock)
-		if err == sql.ErrNoRows {
-			http.NotFound(w, r)
-			return
-		}
-		json.NewEncoder(w).Encode(p)
+	id, err := strconv.Atoi(idStr)
+	if err != nil {
+		http.Error(w, "Invalid ID", http.StatusBadRequest)
+		return
 	}
+
+	if r.Method != "GET" {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	var p Product
+	err = db.QueryRow(
+		`SELECT id, created_at, name, price, stock
+		 FROM product
+		 WHERE id = $1`,
+		id,
+	).Scan(&p.ID, &p.CreatedAt, &p.Name, &p.Price, &p.Stock)
+
+	if err == sql.ErrNoRows {
+		http.NotFound(w, r)
+		return
+	}
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	json.NewEncoder(w).Encode(p)
 }
