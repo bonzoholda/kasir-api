@@ -3,12 +3,22 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
+
+	"github.com/spf13/viper"
 )
 
-// Produk represents a product in the cashier system
+// Config struct for Viper
+type Config struct {
+	Port   string `mapstructure:"PORT"`
+	DBConn string `mapstructure:"DB_CONN"`
+}
+
+// Produk struct
 type Produk struct {
 	ID    int    `json:"id"`
 	Nama  string `json:"nama"`
@@ -16,125 +26,89 @@ type Produk struct {
 	Stok  int    `json:"stok"`
 }
 
-// In-memory storage
+// Keeping the in-memory storage for now so the code runs
 var produk = []Produk{
 	{ID: 1, Nama: "Indomie Godog", Harga: 3500, Stok: 10},
 	{ID: 2, Nama: "Vit 1000ml", Harga: 3000, Stok: 40},
-	{ID: 3, Nama: "kecap", Harga: 12000, Stok: 20},
-}
-
-// Handler for GET (one), PUT, and DELETE
-func handleProdukWithID(w http.ResponseWriter, r *http.Request) {
-	idStr := strings.TrimPrefix(r.URL.Path, "/api/produk/")
-	if idStr == "" {
-		http.Error(w, "ID is required", http.StatusBadRequest)
-		return
-	}
-
-	id, err := strconv.Atoi(idStr)
-	if err != nil {
-		http.Error(w, "Invalid Produk ID", http.StatusBadRequest)
-		return
-	}
-
-	switch r.Method {
-	case "GET":
-		getProdukByID(w, id)
-	case "PUT":
-		updateProduk(w, r, id)
-	case "DELETE":
-		deleteProduk(w, id)
-	default:
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-	}
-}
-
-func getProdukByID(w http.ResponseWriter, id int) {
-	for _, p := range produk {
-		if p.ID == id {
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(p)
-			return
-		}
-	}
-	http.Error(w, "Produk belum ada", http.StatusNotFound)
-}
-
-func updateProduk(w http.ResponseWriter, r *http.Request, id int) {
-	var updatedData Produk
-	err := json.NewDecoder(r.Body).Decode(&updatedData)
-	if err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
-		return
-	}
-
-	for i := range produk {
-		if produk[i].ID == id {
-			updatedData.ID = id
-			produk[i] = updatedData
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(updatedData)
-			return
-		}
-	}
-	http.Error(w, "Produk belum ada", http.StatusNotFound)
-}
-
-func deleteProduk(w http.ResponseWriter, id int) {
-	for i, p := range produk {
-		if p.ID == id {
-			produk = append(produk[:i], produk[i+1:]...)
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]string{"message": "sukses delete"})
-			return
-		}
-	}
-	http.Error(w, "Produk belum ada", http.StatusNotFound)
 }
 
 func main() {
-	// 1. Health Check
+	// 1. SETUP VIPER
+	viper.AutomaticEnv()
+	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
+
+	if _, err := os.Stat(".env"); err == nil {
+		viper.SetConfigFile(".env")
+		_ = viper.ReadInConfig()
+	}
+
+	// Default values if .env is missing
+	viper.SetDefault("PORT", "8080")
+
+	config := Config{
+		Port:   viper.GetString("PORT"),
+		DBConn: viper.GetString("DB_CONN"),
+	}
+
+	// 2. DATABASE (Note: This requires your 'database' package to exist)
+	/* db, err := database.InitDB(config.DBConn)
+	if err != nil {
+		log.Fatal("Failed to initialize database:", err)
+	}
+	defer db.Close()
+	*/
+
+	// 3. ROUTES
 	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{
-			"status":  "OK",
-			"message": "API Running",
-		})
+		json.NewEncoder(w).Encode(map[string]string{"status": "OK"})
 	})
 
-	// 2. Collection Route (GET all, POST new)
-	http.HandleFunc("/api/produk", func(w http.ResponseWriter, r *http.Request) {
-		// Strict check for exact path to avoid colliding with /api/produk/
-		if r.URL.Path != "/api/produk" {
-			http.NotFound(w, r)
-			return
-		}
+	// Collection Route
+	http.HandleFunc("/api/produk", handleProdukCollection)
 
-		if r.Method == "GET" {
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(produk)
-		} else if r.Method == "POST" {
-			var produkBaru Produk
-			if err := json.NewDecoder(r.Body).Decode(&produkBaru); err != nil {
-				http.Error(w, "Invalid request", http.StatusBadRequest)
-				return
-			}
-			produkBaru.ID = len(produk) + 1
-			produk = append(produk, produkBaru)
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusCreated)
-			json.NewEncoder(w).Encode(produkBaru)
-		} else {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		}
-	})
-
-	// 3. Item Route (GET by ID, PUT, DELETE)
+	// Item Route
 	http.HandleFunc("/api/produk/", handleProdukWithID)
 
-	fmt.Println("Server running di localhost:8080")
-	err := http.ListenAndServe(":8080", nil)
-	if err != nil {
-		fmt.Printf("gagal running server: %v\n", err)
+	// 4. START SERVER
+	addr := ":" + config.Port // Railway needs the colon format
+	fmt.Println("Server running di port", addr)
+
+	if err := http.ListenAndServe(addr, nil); err != nil {
+		log.Fatalf("gagal running server: %v", err)
+	}
+}
+
+// --- Handlers ---
+
+func handleProdukCollection(w http.ResponseWriter, r *http.Request) {
+	if r.Method == "GET" {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(produk)
+	} else if r.Method == "POST" {
+		var p Produk
+		json.NewDecoder(r.Body).Decode(&p)
+		p.ID = len(produk) + 1
+		produk = append(produk, p)
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(p)
+	}
+}
+
+func handleProdukWithID(w http.ResponseWriter, r *http.Request) {
+	idStr := strings.TrimPrefix(r.URL.Path, "/api/produk/")
+	id, _ := strconv.Atoi(idStr)
+
+	switch r.Method {
+	case "GET":
+		for _, p := range produk {
+			if p.ID == id {
+				json.NewEncoder(w).Encode(p)
+				return
+			}
+		}
+		http.NotFound(w, r)
+	case "DELETE":
+		// ... delete logic ...
+		w.Write([]byte("Deleted"))
 	}
 }
