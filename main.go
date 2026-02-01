@@ -9,19 +9,17 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"time" // Needed for retry sleep
+	"time"
 
 	_ "github.com/lib/pq" // PostgreSQL Driver
 	"github.com/spf13/viper"
 )
 
-// Config struct
 type Config struct {
 	Port   string
 	DBConn string
 }
 
-// Product matches your database schema exactly
 type Product struct {
 	ID        int64  `json:"id"`
 	CreatedAt string `json:"created_at"`
@@ -30,10 +28,10 @@ type Product struct {
 	Stock     int    `json:"stock"`
 }
 
-var db *sql.DB // Global database connection
+var db *sql.DB
 
 func main() {
-	// 1. SETUP VIPER & ENV
+	// 1. SETUP
 	viper.AutomaticEnv()
 	if _, err := os.Stat(".env"); err == nil {
 		viper.SetConfigFile(".env")
@@ -53,46 +51,48 @@ func main() {
 		dbConn = viper.GetString("DB_CONN")
 	}
 
-	config := Config{
-		Port:   port,
-		DBConn: dbConn,
+	// 2. STABILIZE CONNECTION STRING
+	// We force a timeout so the app doesn't hang forever on EOF
+	if !strings.Contains(dbConn, "connect_timeout") {
+		if strings.Contains(dbConn, "?") {
+			dbConn += "&connect_timeout=15"
+		} else {
+			dbConn += "?connect_timeout=15"
+		}
 	}
 
-	// 2. CONNECT TO DATABASE (With Retry Logic)
-	if config.DBConn == "" {
-		log.Fatal("CRITICAL: DB_CONN is empty. Check Railway settings.")
-	}
-
+	// 3. CONNECT WITH POOLER LIMITS
 	var err error
-	db, err = sql.Open("postgres", config.DBConn)
+	db, err = sql.Open("postgres", dbConn)
 	if err != nil {
-		log.Fatal("Error opening database driver:", err)
+		log.Fatal("Driver error:", err)
 	}
 
-	// PROVEN SETTINGS FOR SUPABASE POOLER:
-	// Limits help prevent the "EOF" error by not overwhelming the pooler
-	db.SetMaxOpenConns(5)
-	db.SetMaxIdleConns(2)
-	db.SetConnMaxLifetime(time.Minute * 5)
+	// PROVEN FIX: The pooler hates multiple idle connections from a fresh boot.
+	// We set these strictly to allow the handshake to finish.
+	db.SetMaxOpenConns(2)
+	db.SetMaxIdleConns(1)
+	db.SetConnMaxLifetime(time.Hour)
 
-	// Retry Ping logic: Gives Railway network time to stabilize
-	fmt.Printf("Starting DB connection attempts (String Length: %d)\n", len(config.DBConn))
+	fmt.Printf("Starting connection attempts (Len: %d)...\n", len(dbConn))
+
+	// Robust Retry Logic
 	for i := 1; i <= 5; i++ {
 		err = db.Ping()
 		if err == nil {
-			fmt.Println("✅ Successfully connected to Database!")
+			fmt.Println("✅ DATABASE CONNECTED SUCCESSFULLY!")
 			break
 		}
-		fmt.Printf("⚠️ Attempt %d/5: Database unreachable, retrying in 2s... (%v)\n", i, err)
-		time.Sleep(2 * time.Second)
+		fmt.Printf("⚠️ Attempt %d/5: %v. Retrying in 3s...\n", i, err)
+		time.Sleep(3 * time.Second)
 	}
 
 	if err != nil {
-		log.Fatal("❌ Failed to connect to database after 5 attempts. Check your DB_CONN string.")
+		log.Fatal("❌ Terminal failure: Could not connect to Supabase.")
 	}
 	defer db.Close()
 
-	// 3. ROUTES
+	// 4. ROUTES
 	http.HandleFunc("/api/produk", handleProductCollection)
 	http.HandleFunc("/api/produk/", handleProductByID)
 	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
@@ -100,16 +100,15 @@ func main() {
 		w.Write([]byte("OK"))
 	})
 
-	addr := ":" + config.Port
-	fmt.Println("🚀 Server running on", addr)
+	addr := ":" + port
+	fmt.Printf("🚀 Server online at %s\n", addr)
 	log.Fatal(http.ListenAndServe(addr, nil))
 }
 
-// --- Handlers ---
+// --- Handlers (Standard Logic) ---
 
 func handleProductCollection(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-
 	if r.Method == "GET" {
 		rows, err := db.Query("SELECT id, created_at, name, price, stock FROM product")
 		if err != nil {
@@ -117,7 +116,6 @@ func handleProductCollection(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		defer rows.Close()
-
 		products := []Product{}
 		for rows.Next() {
 			var p Product
@@ -125,21 +123,18 @@ func handleProductCollection(w http.ResponseWriter, r *http.Request) {
 			products = append(products, p)
 		}
 		json.NewEncoder(w).Encode(products)
-
 	} else if r.Method == "POST" {
 		var p Product
 		if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
 			http.Error(w, "Invalid JSON", http.StatusBadRequest)
 			return
 		}
-
 		query := `INSERT INTO product (name, price, stock) VALUES ($1, $2, $3) RETURNING id, created_at`
 		err := db.QueryRow(query, p.Name, p.Price, p.Stock).Scan(&p.ID, &p.CreatedAt)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(p)
 	}
@@ -148,11 +143,9 @@ func handleProductCollection(w http.ResponseWriter, r *http.Request) {
 func handleProductByID(w http.ResponseWriter, r *http.Request) {
 	idStr := strings.TrimPrefix(r.URL.Path, "/api/produk/")
 	id, _ := strconv.Atoi(idStr)
-
 	if r.Method == "GET" {
 		var p Product
-		query := `SELECT id, created_at, name, price, stock FROM product WHERE id = $1`
-		err := db.QueryRow(query, id).Scan(&p.ID, &p.CreatedAt, &p.Name, &p.Price, &p.Stock)
+		err := db.QueryRow("SELECT id, created_at, name, price, stock FROM product WHERE id = $1", id).Scan(&p.ID, &p.CreatedAt, &p.Name, &p.Price, &p.Stock)
 		if err == sql.ErrNoRows {
 			http.NotFound(w, r)
 			return
