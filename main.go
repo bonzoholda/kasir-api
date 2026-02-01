@@ -16,8 +16,8 @@ import (
 
 // Config struct
 type Config struct {
-	Port   string `mapstructure:"PORT"`
-	DBConn string `mapstructure:"DB_CONN"`
+	Port   string
+	DBConn string
 }
 
 // Product matches your database schema exactly
@@ -32,24 +32,44 @@ type Product struct {
 var db *sql.DB // Global database connection
 
 func main() {
-	// 1. SETUP VIPER
+	// 1. SETUP VIPER & ENV
 	viper.AutomaticEnv()
 	if _, err := os.Stat(".env"); err == nil {
 		viper.SetConfigFile(".env")
 		_ = viper.ReadInConfig()
 	}
-	viper.SetDefault("PORT", "8080")
+
+	// Priority: OS Environment Variable > Viper Config > Default
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = viper.GetString("PORT")
+	}
+	if port == "" {
+		port = "8080"
+	}
+
+	dbConn := os.Getenv("DB_CONN")
+	if dbConn == "" {
+		dbConn = viper.GetString("DB_CONN")
+	}
 
 	config := Config{
-		Port:   viper.GetString("PORT"),
-		DBConn: viper.GetString("DB_CONN"), // Should be DATABASE_URL on Railway
+		Port:   port,
+		DBConn: dbConn,
 	}
 
 	// 2. CONNECT TO DATABASE
+	if config.DBConn == "" {
+		log.Fatal("CRITICAL: DB_CONN environment variable is empty. Check Railway settings.")
+	}
+
+	// Logging the length helps debug without leaking your password in logs
+	fmt.Printf("Attempting to connect to DB (String Length: %d)\n", len(config.DBConn))
+
 	var err error
 	db, err = sql.Open("postgres", config.DBConn)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatal("Error opening database:", err)
 	}
 	defer db.Close()
 
@@ -63,12 +83,18 @@ func main() {
 	http.HandleFunc("/api/produk", handleProductCollection)
 	http.HandleFunc("/api/produk/", handleProductByID)
 
+	// Health check for Railway
+	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("OK"))
+	})
+
 	addr := ":" + config.Port
 	fmt.Println("Server running on", addr)
 	log.Fatal(http.ListenAndServe(addr, nil))
 }
 
-// --- Handlers using SQL ---
+// --- Handlers remain unchanged to keep your logic intact ---
 
 func handleProductCollection(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
@@ -81,7 +107,7 @@ func handleProductCollection(w http.ResponseWriter, r *http.Request) {
 		}
 		defer rows.Close()
 
-		var products []Product
+		var products []Product = []Product{} // Initialize empty to avoid null in JSON
 		for rows.Next() {
 			var p Product
 			rows.Scan(&p.ID, &p.CreatedAt, &p.Name, &p.Price, &p.Stock)
@@ -96,7 +122,6 @@ func handleProductCollection(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Insert into "product" table
 		query := `INSERT INTO product (name, price, stock) VALUES ($1, $2, $3) RETURNING id, created_at`
 		err := db.QueryRow(query, p.Name, p.Price, p.Stock).Scan(&p.ID, &p.CreatedAt)
 		if err != nil {
