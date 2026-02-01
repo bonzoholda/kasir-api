@@ -1,0 +1,12 @@
+{
+    "sqltools.connections": [
+        {
+            "ssh": "Disabled",
+            "previewLimit": 50,
+            "server": "localhost",
+            "driver": "PostgreSQL",
+            "name": "railway-produk",
+            "connectString": "postgresql://postgres.xekpqazrzqvexknylcxt:ey23uyIVe3wBD30h@aws-1-ap-southeast-2.pooler.supabase.com:6543/postgres"
+        }
+    ]
+}

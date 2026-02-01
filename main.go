@@ -20,10 +20,11 @@ type Config struct {
 
 // Produk struct
 type Produk struct {
-	ID    int    `json:"id"`
-	Nama  string `json:"nama"`
-	Harga int    `json:"harga"`
-	Stok  int    `json:"stok"`
+	ID        int64  `json:"id"`         // bigint maps to int64
+	CreatedAt string `json:"created_at"` // matches timestamp
+	Name      string `json:"name"`       // matches name
+	Price     int    `json:"price"`      // matches price
+	Stock     int    `json:"stock"`      // matches stock
 }
 
 // Keeping the in-memory storage for now so the code runs
