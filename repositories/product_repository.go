@@ -14,22 +14,20 @@ func NewProductRepository(db *sql.DB) *ProductRepository {
 	return &ProductRepository{db: db}
 }
 
-func (repo *ProductRepository) GetAll() ([]models.Product, error) {
+// 1. Update the signature to accept 'name'
+func (repo *ProductRepository) GetAll(name string) ([]models.Product, error) {
+	// Start with the base query
 	query := "SELECT id, name, price, stock FROM products"
-	rows, err := repo.db.Query(query)
+	var args []interface{}
 
-	args := []interface{}{}
-	if nameFilter != "" {
-		query += " WHERE p.name ILIKE $1"
-		args = append(args, "%"+nameFilter+"%")
+	// 2. Append the filter only if name is provided
+	if name != "" {
+		query += " WHERE name ILIKE $1"
+		args = append(args, "%"+name+"%")
 	}
 
+	// 3. Execute the query ONCE with the arguments
 	rows, err := repo.db.Query(query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
 	if err != nil {
 		return nil, err
 	}
