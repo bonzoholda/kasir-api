@@ -61,12 +61,18 @@ func main() {
 		log.Fatal("❌ DB_CONN is not set")
 	}
 
+	// ✅ FIX: Ensure connect_timeout and Simple Protocol for Supabase/PgBouncer compatibility
 	if !strings.Contains(dbConn, "connect_timeout") {
 		if strings.Contains(dbConn, "?") {
 			dbConn += "&connect_timeout=15"
 		} else {
 			dbConn += "?connect_timeout=15"
 		}
+	}
+
+	// Force simple_protocol to avoid "prepared statement already exists" errors
+	if !strings.Contains(dbConn, "default_query_exec_mode") {
+		dbConn += "&default_query_exec_mode=simple_protocol"
 	}
 
 	// --- DB CONNECT ---
@@ -108,12 +114,11 @@ func main() {
 	mux.HandleFunc("/api/produk", handleProductCollection)
 	mux.HandleFunc("/api/produk/", handleProductByID)
 
-	// ✅ CHECKOUT ROUTE: Mapped to both slash and no-slash for maximum safety
+	// ✅ CHECKOUT ROUTE
 	mux.HandleFunc("/api/checkout", txHandler.HandleCheckout)
 	mux.HandleFunc("/api/checkout/", txHandler.HandleCheckout)
 
-	// ✅ THE FIX: Use http.HandlerFunc to convert your method into a Handler,
-	// then use mux.Handle instead of HandleFunc.
+	// ✅ REPORT ROUTE
 	mux.Handle("/api/report/hari-ini", requestLogger(http.HandlerFunc(txHandler.GetSummary)))
 
 	// Health check
@@ -122,7 +127,7 @@ func main() {
 		w.Write([]byte("OK"))
 	})
 
-	// 🔍 CATCH-ALL: Log any path that doesn't match the above
+	// 🔍 CATCH-ALL
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("❓ 404 ALERT: Route not found for [%s] %s", r.Method, r.URL.Path)
 		http.NotFound(w, r)
