@@ -93,3 +93,15 @@ func (repo *ProductRepository) Delete(id int) error {
 
 	return err
 }
+
+args := []interface{}{}
+if nameFilter != "" {
+	query += " WHERE p.name ILIKE $1"
+	args = append(args, "%"+nameFilter+"%")
+}
+
+rows, err := repo.db.Query(query, args...)
+if err != nil {
+	return nil, err
+}
+defer rows.Close()
