@@ -30,10 +30,21 @@ func (h *ProductHandler) HandleProducts(w http.ResponseWriter, r *http.Request) 
 }
 
 func (h *ProductHandler) GetAll(w http.ResponseWriter, r *http.Request) {
+	// 1. Extract the 'name' query parameter
 	name := r.URL.Query().Get("name")
 
+	// 2. Call the service to get products (passing the name filter)
+	products, err := h.service.GetAll(name)
+	if err != nil {
+		http.Error(w, "Failed to fetch products: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// 3. Return the slice of products as JSON
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(name)
+	if err := json.NewEncoder(w).Encode(products); err != nil {
+		http.Error(w, "Error encoding response", http.StatusInternalServerError)
+	}
 }
 
 func (h *ProductHandler) Create(w http.ResponseWriter, r *http.Request) {
