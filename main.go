@@ -112,6 +112,10 @@ func main() {
 	mux.HandleFunc("/api/checkout", txHandler.HandleCheckout)
 	mux.HandleFunc("/api/checkout/", txHandler.HandleCheckout)
 
+	// ✅ THE FIX: Use http.HandlerFunc to convert your method into a Handler,
+	// then use mux.Handle instead of HandleFunc.
+	mux.Handle("/api/report/hari-ini", requestLogger(http.HandlerFunc(txHandler.GetSummary)))
+
 	// Health check
 	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)

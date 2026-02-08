@@ -79,3 +79,50 @@ func (repo *TransactionRepository) CreateTransaction(tx *sql.Tx, items []models.
 		Details:     details,
 	}, nil
 }
+
+// ✅ NEW: Added for the Daily Report Mapping
+func (repo *TransactionRepository) GetTodaySummary() (map[string]interface{}, error) {
+	var revenue int
+	var count int
+	var topName string
+	var topQty int
+
+	// 1. Get Total Revenue and Transaction Count for Today
+	err := repo.db.QueryRow(`
+        SELECT COALESCE(SUM(total_amount), 0), COUNT(id) 
+        FROM transactions 
+        WHERE DATE(created_at) = CURRENT_DATE
+    `).Scan(&revenue, &count)
+	if err != nil {
+		return nil, err
+	}
+
+	// 2. Get Top Selling Product for Today using a JOIN
+	err = repo.db.QueryRow(`
+        SELECT p.name, SUM(td.quantity) as total_qty
+        FROM transaction_details td
+        JOIN product p ON td.product_id = p.id
+        JOIN transactions t ON td.transaction_id = t.id
+        WHERE DATE(t.created_at) = CURRENT_DATE
+        GROUP BY p.name
+        ORDER BY total_qty DESC
+        LIMIT 1
+    `).Scan(&topName, &topQty)
+
+	// Handle case where no transactions exist today
+	if err == sql.ErrNoRows {
+		topName = "Belum ada transaksi"
+		topQty = 0
+	} else if err != nil {
+		return nil, err
+	}
+
+	return map[string]interface{}{
+		"total_revenue":   revenue,
+		"total_transaksi": count,
+		"produk_terlaris": map[string]interface{}{
+			"nama":        topName,
+			"qty_terjual": topQty,
+		},
+	}, nil
+}

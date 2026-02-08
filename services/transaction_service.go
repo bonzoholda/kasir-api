@@ -46,3 +46,7 @@ func (s *TransactionService) Checkout(items []models.CheckoutItem, useLock bool)
 
 	return transaction, nil
 }
+
+func (s *TransactionService) GetDailyReport() (map[string]interface{}, error) {
+	return s.repo.GetTodaySummary()
+}
