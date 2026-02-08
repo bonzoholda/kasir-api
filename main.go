@@ -11,7 +11,11 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/jackc/pgx/v5/stdlib" // ✅ pgx stdlib driver
+	"kasir-api/handlers"
+	"kasir-api/repositories"
+	"kasir-api/services"
+
+	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/spf13/viper"
 )
 
@@ -24,6 +28,14 @@ type Product struct {
 }
 
 var db *sql.DB
+
+// Middleware for universal logging - this is your best friend for debugging Railway
+func requestLogger(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("📢 [%s] %s - From: %s", r.Method, r.URL.Path, r.RemoteAddr)
+		next.ServeHTTP(w, r)
+	})
+}
 
 func main() {
 	// --- ENV SETUP ---
@@ -49,7 +61,6 @@ func main() {
 		log.Fatal("❌ DB_CONN is not set")
 	}
 
-	// Ensure connect_timeout exists
 	if !strings.Contains(dbConn, "connect_timeout") {
 		if strings.Contains(dbConn, "?") {
 			dbConn += "&connect_timeout=15"
@@ -60,18 +71,16 @@ func main() {
 
 	// --- DB CONNECT ---
 	var err error
-	db, err = sql.Open("pgx", dbConn) // ✅ pgx driver
+	db, err = sql.Open("pgx", dbConn)
 	if err != nil {
 		log.Fatal("Driver error:", err)
 	}
 
-	// Supabase PgBouncer-safe limits
 	db.SetMaxOpenConns(2)
 	db.SetMaxIdleConns(1)
 	db.SetConnMaxLifetime(time.Hour)
 
-	fmt.Printf("Starting connection attempts (Len: %d)...\n", len(dbConn))
-
+	fmt.Printf("Starting connection attempts...\n")
 	for i := 1; i <= 5; i++ {
 		err = db.Ping()
 		if err == nil {
@@ -87,31 +96,59 @@ func main() {
 	}
 	defer db.Close()
 
-	// --- ROUTES ---
-	http.HandleFunc("/api/produk", handleProductCollection)
-	http.HandleFunc("/api/produk/", handleProductByID)
-	http.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
+	// --- INITIALIZE HANDLERS ---
+	txRepo := repositories.NewTransactionRepository(db)
+	txService := services.NewTransactionService(db, txRepo)
+	txHandler := handlers.NewTransactionHandler(txService)
+
+	// --- ROUTES SETUP ---
+	mux := http.NewServeMux()
+
+	// Products
+	mux.HandleFunc("/api/produk", handleProductCollection)
+	mux.HandleFunc("/api/produk/", handleProductByID)
+
+	// ✅ CHECKOUT ROUTE: Mapped to both slash and no-slash for maximum safety
+	mux.HandleFunc("/api/checkout", txHandler.HandleCheckout)
+	mux.HandleFunc("/api/checkout/", txHandler.HandleCheckout)
+
+	// Health check
+	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("OK"))
 	})
 
+	// 🔍 CATCH-ALL: Log any path that doesn't match the above
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("❓ 404 ALERT: Route not found for [%s] %s", r.Method, r.URL.Path)
+		http.NotFound(w, r)
+	})
+
 	addr := ":" + port
 	fmt.Printf("🚀 Server online at %s\n", addr)
-	log.Fatal(http.ListenAndServe(addr, nil))
+
+	// Apply the global logger middleware to the mux
+	log.Fatal(http.ListenAndServe(addr, requestLogger(mux)))
 }
 
-// --- HANDLERS ---
+// --- PRODUCT HANDLERS ---
 
 func handleProductCollection(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
 	switch r.Method {
 	case "GET":
-		rows, err := db.Query(`
-			SELECT id, created_at, name, price, stock
-			FROM product
-			ORDER BY id DESC
-		`)
+		name := r.URL.Query().Get("name")
+		query := "SELECT id, created_at, name, price, stock FROM product"
+		var args []interface{}
+
+		if name != "" {
+			query += " WHERE name ILIKE $1"
+			args = append(args, "%"+name+"%")
+		}
+		query += " ORDER BY id DESC"
+
+		rows, err := db.Query(query, args...)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -127,7 +164,6 @@ func handleProductCollection(w http.ResponseWriter, r *http.Request) {
 			}
 			products = append(products, p)
 		}
-
 		json.NewEncoder(w).Encode(products)
 
 	case "POST":
@@ -139,8 +175,8 @@ func handleProductCollection(w http.ResponseWriter, r *http.Request) {
 
 		err := db.QueryRow(
 			`INSERT INTO product (name, price, stock)
-			 VALUES ($1, $2, $3)
-			 RETURNING id, created_at`,
+             VALUES ($1, $2, $3)
+             RETURNING id, created_at`,
 			p.Name, p.Price, p.Stock,
 		).Scan(&p.ID, &p.CreatedAt)
 
@@ -173,8 +209,8 @@ func handleProductByID(w http.ResponseWriter, r *http.Request) {
 	var p Product
 	err = db.QueryRow(
 		`SELECT id, created_at, name, price, stock
-		 FROM product
-		 WHERE id = $1`,
+         FROM product
+         WHERE id = $1`,
 		id,
 	).Scan(&p.ID, &p.CreatedAt, &p.Name, &p.Price, &p.Stock)
 

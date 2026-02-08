@@ -1,3 +1,7 @@
+package models
+
+import "time"
+
 type Transaction struct {
 	ID          int                 `json:"id"`
 	TotalAmount int                 `json:"total_amount"`

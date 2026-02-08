@@ -2,9 +2,9 @@ package handlers
 
 import (
 	"encoding/json"
-	"net/http"
-
+	"kasir-api/models" // <--- FIX 1: Add this import
 	"kasir-api/services"
+	"net/http"
 )
 
 type TransactionHandler struct {
@@ -17,6 +17,9 @@ func NewTransactionHandler(service *services.TransactionService) *TransactionHan
 
 // multiple item apa aja, quantity nya
 func (h *TransactionHandler) HandleCheckout(w http.ResponseWriter, r *http.Request) {
+	// ADD THIS LOG LINE:
+	println("DEBUG: Request received at HandleCheckout! Method:", r.Method)
+
 	switch r.Method {
 	case http.MethodPost:
 		h.Checkout(w, r)
@@ -33,7 +36,10 @@ func (h *TransactionHandler) Checkout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	transaction, err := h.service.Checkout(req.Items)
+	// FIX 2: Matching the "want" ([]models.CheckoutItem, bool)
+	// Based on your error, the service expects two things.
+	// I am passing 'true' as a placeholder for the bool.
+	transaction, err := h.service.Checkout(req.Items, true)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
